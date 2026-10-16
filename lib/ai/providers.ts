@@ -9,7 +9,7 @@
  * Deliberately no SDKs — plain fetch keeps the bundle small and the behaviour obvious.
  */
 
-export type ProviderId = "gemini" | "groq" | "openrouter" | "ollama" | "openai";
+export type ProviderId = "shared" | "gemini" | "groq" | "openrouter" | "ollama" | "openai";
 
 export interface Provider {
   id: ProviderId;
@@ -28,6 +28,18 @@ export interface Provider {
 }
 
 export const PROVIDERS: Provider[] = [
+  {
+    id: "shared",
+    label: "Use the built-in model",
+    blurb:
+      "No key, no sign-up. Shared with everyone using this site, so there is an hourly limit " +
+      "and it may be busy. Get your own free key below for no limit.",
+    cost: "free",
+    keyUrl: "",
+    keyHint: "",
+    models: [],
+    needsKey: false,
+  },
   {
     id: "gemini",
     label: "Google Gemini",
@@ -87,6 +99,16 @@ export const PROVIDERS: Provider[] = [
 
 export const providerById = (id: string): Provider | undefined => PROVIDERS.find((p) => p.id === id);
 
+/**
+ * The built-in model only exists if the deployment set a token for it, and the browser cannot
+ * see server env, so the admin flags it at build time with NEXT_PUBLIC_SHARED_AI=1. Hidden by
+ * default: offering an option that always errors is worse than not offering it.
+ */
+export const sharedAiOffered = (): boolean => process.env.NEXT_PUBLIC_SHARED_AI === "1";
+
+export const availableProviders = (): Provider[] =>
+  PROVIDERS.filter((p) => p.id !== "shared" || sharedAiOffered());
+
 export interface AskOptions {
   provider: ProviderId;
   model: string;
@@ -128,8 +150,30 @@ function explain(status: number, body: string, provider: ProviderId): string {
 
 /** Ask the model, returning its raw text reply. */
 export async function ask(opts: AskOptions): Promise<string> {
+  if (opts.provider === "shared") return askShared(opts);
   if (opts.provider === "gemini") return askGemini(opts);
   return askOpenAiCompatible(opts);
+}
+
+/**
+ * The built-in option. Goes to our own server, which holds the token — the only provider
+ * where the request does not leave the browser for a third party directly.
+ */
+async function askShared({ system, user, signal }: AskOptions): Promise<string> {
+  const res = await fetch("/api/ai", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    signal,
+    body: JSON.stringify({ system, user }),
+  }).catch((e) => {
+    throw new LlmError(networkHint(e, "shared"));
+  });
+
+  const body = (await res.json().catch(() => ({}))) as { text?: string; error?: string };
+  if (!res.ok || !body.text) {
+    throw new LlmError(body.error ?? `The built-in model failed (status ${res.status}).`);
+  }
+  return body.text;
 }
 
 async function askGemini({ model, apiKey, system, user, signal }: AskOptions): Promise<string> {
@@ -181,6 +225,7 @@ async function askOpenAiCompatible({
 }: AskOptions): Promise<string> {
   const base = (baseUrl || BASE_URLS[provider] || "").replace(/\/+$/, "");
   if (!base) throw new LlmError(`No endpoint configured for ${provider}.`);
+  if (isBlockedLocalCall(base, provider)) throw new LlmError(networkHint(new Error("blocked"), provider, base));
 
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
@@ -203,7 +248,7 @@ async function askOpenAiCompatible({
       ],
     }),
   }).catch((e) => {
-    throw new LlmError(networkHint(e, provider));
+    throw new LlmError(networkHint(e, provider, base));
   });
 
   const body = await res.text();
@@ -245,13 +290,36 @@ async function askWithoutJsonMode(
   return text;
 }
 
+/**
+ * True when the page is served over https but the model is on plain http at localhost.
+ *
+ * Browsers refuse that combination: it is mixed content, and Chrome's Private Network Access
+ * rules additionally require the local server to answer a special preflight, which Ollama does
+ * not. So Ollama can only be used when Resume Studio itself is running locally. Worth saying
+ * plainly, because the browser reports it as an indistinguishable "failed to fetch".
+ */
+export function isBlockedLocalCall(baseUrl: string | undefined, provider: ProviderId): boolean {
+  if (provider !== "ollama" || typeof window === "undefined") return false;
+  if (window.location.protocol !== "https:") return false;
+  const target = baseUrl || BASE_URLS.ollama;
+  return target.startsWith("http://");
+}
+
 /** A failed fetch in the browser hides the reason, so guess usefully. */
-function networkHint(error: unknown, provider: ProviderId): string {
+function networkHint(error: unknown, provider: ProviderId, baseUrl?: string): string {
   if ((error as Error)?.name === "AbortError") return "Cancelled.";
   if (provider === "ollama") {
+    if (isBlockedLocalCall(baseUrl, provider)) {
+      return (
+        "Your browser blocked this. Resume Studio is on https, and Ollama is on plain http on " +
+        "your own machine — browsers refuse that combination, so Ollama only works when you run " +
+        "Resume Studio locally (npm run dev). On this site, use a free Gemini or Groq key instead."
+      );
+    }
     return (
       "Could not reach Ollama. Check it is running (`ollama serve`), that you have pulled the " +
-      "model (`ollama pull llama3.2`), and that it allows this page: set OLLAMA_ORIGINS=* and restart it."
+      "model (`ollama pull llama3.2`), and that it allows this page — start it with " +
+      "OLLAMA_ORIGINS=* set, otherwise it rejects requests from the browser."
     );
   }
   return "Could not reach the provider. Check your internet connection and try again.";

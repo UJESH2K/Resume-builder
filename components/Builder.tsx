@@ -6,6 +6,7 @@ import { applyPlan, type AppliedPlan, type TailorPlan } from "@/lib/ai/tailor";
 import type { JobRole } from "@/lib/roles";
 import { ACCENTS, SECTION_DEFS, allTags, blankVariant, itemsOf, matchesTags, selectByTags, uid } from "@/lib/sections";
 import { Tailor } from "./Tailor";
+import { Welcome } from "./Welcome";
 import type { AnyItem, Bullet, Db, Variant, VariantSection } from "@/lib/types";
 import { PageHead } from "./AppShell";
 import { useDb } from "./DbProvider";
@@ -173,6 +174,7 @@ export function Builder() {
     return (
       <div className="builder">
         <aside className="controls">
+          <Welcome db={db} />
           <Tailor db={db} onApply={buildForRole} />
           <div className="panel">
             <p className="tailor-pitch">Or start from an empty resume and pick entries yourself.</p>
@@ -270,6 +272,7 @@ export function Builder() {
       />
       <div className={`builder ${view === "timeline" ? "wide" : ""}`}>
       <aside className="controls">
+        <Welcome db={db} />
         <Tailor db={db} onApply={buildForRole} />
 
         {/* Variant picker */}

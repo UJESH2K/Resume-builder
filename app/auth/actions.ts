@@ -12,6 +12,17 @@ export interface AuthState {
 
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+/**
+ * The public address of this deployment, e.g. https://resume-builder.ujesh.in
+ *
+ * Set APP_ORIGIN in production. It is used for links that leave the app and come back —
+ * the confirmation email above — and it is also what keeps auth redirects on https behind
+ * a reverse proxy (see proxy.ts). Empty locally, where Supabase's own default is correct.
+ */
+function siteOrigin(): string {
+  return (process.env.APP_ORIGIN ?? process.env.NEXT_PUBLIC_SITE_URL ?? "").trim().replace(/\/+$/, "");
+}
+
 /** Only allow redirects back into this app, never to another site. */
 function safeNext(next: FormDataEntryValue | null): string {
   const s = typeof next === "string" ? next : "";
@@ -34,7 +45,13 @@ export async function signUp(_prev: AuthState, formData: FormData): Promise<Auth
   const { data, error } = await supabase.auth.signUp({
     email,
     password,
-    options: { data: { full_name: name } },
+    options: {
+      data: { full_name: name },
+      // Where the confirmation email sends them. Without this, Supabase falls back to the
+      // project's Site URL, which defaults to http://localhost:3000 — so students on the
+      // deployed site get an email that bounces them to their own machine.
+      ...(siteOrigin() ? { emailRedirectTo: `${siteOrigin()}/login` } : {}),
+    },
   });
 
   if (error) return { error: error.message, values };

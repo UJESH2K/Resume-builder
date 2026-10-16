@@ -66,6 +66,17 @@ Needs `SUPABASE_SERVICE_ROLE_KEY` in `.env.local`.
   switched on so the Builder is not a blank page. Never invent achievements for them.
 - `proxy.ts`: Next 16's renamed middleware. Refreshes the session and gates pages. It is an
   optimistic check only; the real checks are `requireUser()` plus row level security.
+  Redirects go through `absolute()`, which prefers APP_ORIGIN over forwarded headers — behind
+  a TLS-terminating proxy the raw request looks like http on an internal host, and trusting a
+  forwarded host blindly would be an open redirect.
+- `lib/github.ts` + `app/api/github`: username -> public repos + READMEs -> text for the
+  importer. The profile repo (`<user>/<user>`) is deliberately kept OUT of the project list and
+  framed as "about me" instead. Budgets matter: 12 repos x 1400 README chars keeps a real
+  profile near ~15k chars (~3.7k tokens) so small free models can still read it.
+- `app/api/ai`: the only server-side model call — the "no API key" option, using the admin's
+  SHARED_AI_TOKEN. Sign-in required, per-user hourly cap, prompt size capped, upstream errors
+  never passed through verbatim (they can name the account). Hidden unless
+  NEXT_PUBLIC_SHARED_AI=1 at build time.
 - `lib/ai/extract.ts`: the Quick start importer — pasted prose to library entries. This is the
   ONE place a model writes content, so the guards matter: the prompt forbids inventing dates,
   numbers, employers or metrics; we generate every id ourselves; every field is clipped, tags are

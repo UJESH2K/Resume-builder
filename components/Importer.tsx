@@ -43,7 +43,9 @@ export function Importer() {
 
   const [text, setText] = useState("");
   const [url, setUrl] = useState("");
-  const [busy, setBusy] = useState<"" | "fetch" | "read" >("");
+  const [gh, setGh] = useState("");
+  const [ghInfo, setGhInfo] = useState<string | null>(null);
+  const [busy, setBusy] = useState<"" | "fetch" | "github" | "read">("");
   const [error, setError] = useState<string | null>(null);
   const [extracted, setExtracted] = useState<Extracted | null>(null);
   const [accepted, setAccepted] = useState<Set<string>>(new Set());
@@ -75,6 +77,43 @@ export function Importer() {
       if (!r.ok || !j.text) throw new Error(j.error ?? "Could not read that link.");
       // Append rather than replace, so a student can combine a link and their own notes.
       setText((prev) => (prev.trim() ? `${prev.trim()}\n\n${j.text}` : j.text!));
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy("");
+    }
+  };
+
+  /** Pull every public repo + README for a username and drop the text into the box. */
+  const fetchGithub = async () => {
+    const username = gh.trim();
+    if (!username) return;
+    setBusy("github");
+    setError(null);
+    setGhInfo(null);
+    try {
+      const r = await fetch("/api/github", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username }),
+      });
+      const j = (await r.json()) as {
+        text?: string;
+        error?: string;
+        totalRepos?: number;
+        used?: number;
+        withReadme?: number;
+      };
+      if (!r.ok || !j.text) throw new Error(j.error ?? "Could not read that GitHub profile.");
+      // Append, so a student can combine GitHub with their own notes about internships.
+      setText((prev) => (prev.trim() ? `${prev.trim()}
+
+${j.text}` : j.text!));
+      setGhInfo(
+        `Read ${j.used} of ${j.totalRepos} public repos (${j.withReadme} had a README). ` +
+          `Check the text below, add anything GitHub does not know about — internships, ` +
+          `college, hackathons — then turn it into entries.`
+      );
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -141,6 +180,8 @@ export function Importer() {
     setExtracted(null);
     setText("");
     setUrl("");
+    setGh("");
+    setGhInfo(null);
   };
 
   if (!db) return <div className="empty-state">Loading your library…</div>;
@@ -177,25 +218,50 @@ export function Importer() {
           </label>
           <p className="tailor-hint">{text.trim().length} characters</p>
 
-          <details className="tailor-ai">
-            <summary>Or pull the text from a link</summary>
-            <p className="tailor-hint">
-              Works for a GitHub profile, a portfolio site or a public page. LinkedIn blocks
-              automated reading — for that, open your profile, select all, copy, and paste above.
-            </p>
-            <label className="field">
-              <span>Link</span>
-              <input
-                value={url}
-                placeholder="https://github.com/yourname"
-                spellCheck={false}
-                onChange={(e) => setUrl(e.target.value)}
-              />
-            </label>
-            <button className="btn sm" onClick={fetchLink} disabled={!url.trim() || busy !== ""}>
-              {busy === "fetch" ? "Reading the page…" : "Add this page's text"}
-            </button>
-          </details>
+          <div className="source-row">
+            <div className="source-card">
+              <strong>Import everything from GitHub</strong>
+              <p>
+                Your public repositories and their READMEs, read in one go — the fastest way to
+                fill a projects section you would otherwise retype by hand.
+              </p>
+              <div className="row gap-xs wrap">
+                <input
+                  className="grow"
+                  value={gh}
+                  placeholder="your GitHub username"
+                  spellCheck={false}
+                  autoCapitalize="off"
+                  onKeyDown={(e) => e.key === "Enter" && fetchGithub()}
+                  onChange={(e) => setGh(e.target.value)}
+                />
+                <button className="btn primary-ghost" onClick={fetchGithub} disabled={!gh.trim() || busy !== ""}>
+                  {busy === "github" ? "Reading GitHub…" : "Fetch my repos"}
+                </button>
+              </div>
+              {ghInfo && <p className="tailor-hint ok-text">{ghInfo}</p>}
+            </div>
+
+            <details className="tailor-ai">
+              <summary>Or pull the text from any link</summary>
+              <p className="tailor-hint">
+                A portfolio site or any public page. LinkedIn blocks automated reading — for
+                that, open your profile, select all, copy, and paste above.
+              </p>
+              <label className="field">
+                <span>Link</span>
+                <input
+                  value={url}
+                  placeholder="https://your-portfolio.com"
+                  spellCheck={false}
+                  onChange={(e) => setUrl(e.target.value)}
+                />
+              </label>
+              <button className="btn sm" onClick={fetchLink} disabled={!url.trim() || busy !== ""}>
+                {busy === "fetch" ? "Reading the page…" : "Add this page's text"}
+              </button>
+            </details>
+          </div>
         </div>
 
         <div className="panel">

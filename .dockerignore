@@ -15,4 +15,4 @@ data
 # Docs are not needed at runtime (HF Spaces needs README.md, so it is kept)
 CLAUDE.md
 AGENTS.md
-DEPLOY-HF.md
+DEPLOY.md

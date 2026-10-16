@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { PROVIDERS, providerById, type Provider, type ProviderId } from "./providers";
+import { availableProviders, PROVIDERS, providerById, sharedAiOffered, type Provider, type ProviderId } from "./providers";
 
 /**
  * The student's AI settings, shared by every feature that needs a model (the role tailor and
@@ -23,8 +23,9 @@ export interface AiConfig {
 }
 
 export const AI_DEFAULTS: AiConfig = {
-  provider: "gemini",
-  model: PROVIDERS[0].models[0],
+  // Prefer the zero-setup option when this deployment offers it.
+  provider: sharedAiOffered() ? "shared" : "gemini",
+  model: providerById("gemini")!.models[0],
   apiKey: "",
   baseUrl: "",
   remember: true,
@@ -77,13 +78,15 @@ export function useAiConfig(): UseAiConfig {
   const switchProvider = useCallback((id: ProviderId) => {
     const p = providerById(id)!;
     setCfg((prev) => {
-      const next = { ...prev, provider: id, model: p.models[0], baseUrl: p.defaultBaseUrl ?? "" };
+      const next = { ...prev, provider: id, model: p.models[0] ?? "", baseUrl: p.defaultBaseUrl ?? "" };
       saveAiConfig(next);
       return next;
     });
   }, []);
 
-  const provider = providerById(cfg.provider) ?? PROVIDERS[0];
+  // A stored provider can disappear (the admin turned the shared model off), so fall back.
+  const stored = providerById(cfg.provider);
+  const provider = stored && (stored.id !== "shared" || sharedAiOffered()) ? stored : providerById("gemini")!;
   const ready = !provider.needsKey || cfg.apiKey.trim().length > 0;
 
   return { cfg, provider, set, switchProvider, ready };

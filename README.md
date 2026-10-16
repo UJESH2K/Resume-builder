@@ -116,6 +116,9 @@ the TeX packages the template needs and runs the app as a non-root user.
 Note that `NEXT_PUBLIC_*` values are compiled into the browser bundle, so they must be passed
 at **build** time, not just at runtime.
 
+See **[DEPLOY.md](DEPLOY.md)** for the full walkthrough: Render, a custom domain, Hugging Face
+Spaces and Google Cloud Run, plus the Supabase settings a live site needs.
+
 ### Check the container locally
 
 ```bash
@@ -174,7 +177,11 @@ CPU consumer.
    about yourself: a few messy sentences, bullet points, or a copy-paste of an old resume. A
    model turns it into library entries (education, experience, projects, skills, awards,
    certificates), you tick the ones that are right, and they are saved to your library.
-   - You can also give a **link** (GitHub profile, portfolio) and it pulls the page's text in.
+   - **Import everything from GitHub**: type a username and it reads every public repository
+     and its README in one go — the fastest way to fill a projects section you would otherwise
+     retype by hand. Your profile README is read too, as background for skills and awards,
+     rather than as a project.
+   - You can also give any **link** (a portfolio site) and it pulls the page's text in.
      LinkedIn blocks automated reading, so for that: open your profile, select all, copy, paste.
    - It only uses what you actually wrote. The prompt forbids inventing dates, numbers,
      employers, grades or metrics — if your text has no numbers, neither does the output.
@@ -208,6 +215,7 @@ CPU consumer.
    | Groq | free | [console.groq.com/keys](https://console.groq.com/keys) |
    | OpenRouter | free models (`:free`) | [openrouter.ai/keys](https://openrouter.ai/keys) |
    | Ollama | free, runs on your laptop | [ollama.com/download](https://ollama.com/download) |
+| The built-in model | free, no key at all | only if the admin switched it on |
    | OpenAI | paid | [platform.openai.com/api-keys](https://platform.openai.com/api-keys) |
 
    Your key is used by your own browser and sent **straight to the provider**. It never
@@ -283,6 +291,9 @@ A push replaces the whole library. The previous contents are snapshotted into
 | `lib/url-guard.ts` | Blocks private/metadata addresses for the link importer (SSRF). |
 | `lib/html-text.ts` | HTML to readable text for the link importer. |
 | `components/Importer.tsx` | The Quick start screen. |
+| `components/Welcome.tsx` | First-run guide; ticks itself off as the student progresses. |
+| `lib/github.ts` | Reading a GitHub profile into text for the importer. |
+| `app/api/ai/route.ts` | The optional shared model, for students with no key of their own. |
 | `proxy.ts` | Session refresh and page gating (Next 16's renamed middleware). |
 | `latex/preamble.tex` | The template preamble. Edit it to change fonts, margins or spacing for every variant. |
 | `lib/latex.ts` | Turns a library and a variant into LaTeX. |

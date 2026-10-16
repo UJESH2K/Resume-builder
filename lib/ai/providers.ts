@@ -9,6 +9,12 @@
  * Deliberately no SDKs — plain fetch keeps the bundle small and the behaviour obvious.
  */
 
+/**
+ * Enough room for the importer to emit a dozen projects with bullets. Too small and the reply
+ * is cut off mid-object; providers with JSON mode then reject it outright.
+ */
+const MAX_OUTPUT_TOKENS = 8000;
+
 export type ProviderId = "shared" | "gemini" | "groq" | "openrouter" | "ollama" | "openai";
 
 export interface Provider {
@@ -57,7 +63,7 @@ export const PROVIDERS: Provider[] = [
     cost: "free",
     keyUrl: "https://console.groq.com/keys",
     keyHint: "Starts with gsk_…",
-    models: ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "openai/gpt-oss-20b"],
+    models: ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "llama-3.1-8b-instant", "llama-3.3-70b-versatile"],
     needsKey: true,
   },
   {
@@ -188,7 +194,11 @@ async function askGemini({ model, apiKey, system, user, signal }: AskOptions): P
     body: JSON.stringify({
       systemInstruction: { parts: [{ text: system }] },
       contents: [{ role: "user", parts: [{ text: user }] }],
-      generationConfig: { temperature: 0.2, responseMimeType: "application/json" },
+      generationConfig: {
+        temperature: 0.2,
+        responseMimeType: "application/json",
+        maxOutputTokens: MAX_OUTPUT_TOKENS,
+      },
     }),
   }).catch((e) => {
     throw new LlmError(networkHint(e, "gemini"));
@@ -241,6 +251,9 @@ async function askOpenAiCompatible({
     body: JSON.stringify({
       model,
       temperature: 0.2,
+      // Without a generous cap the reply is truncated mid-object and the provider rejects it
+      // as invalid JSON — which is what "Failed to validate JSON" actually means.
+      max_tokens: MAX_OUTPUT_TOKENS,
       response_format: { type: "json_object" },
       messages: [
         { role: "system", content: system },
@@ -253,8 +266,14 @@ async function askOpenAiCompatible({
 
   const body = await res.text();
   if (!res.ok) {
-    // Some local/older servers reject response_format. Retry once without it.
-    if (/response_format/i.test(body)) return askWithoutJsonMode({ provider, model, apiKey, system, user, baseUrl, signal }, base, headers);
+    // Two cases worth one more attempt without JSON mode:
+    //  * older/local servers that reject response_format outright;
+    //  * providers that enforce JSON mode and reject a reply that did not parse. Our own
+    //    parser is more forgiving (it digs the object out of prose), so plain mode often
+    //    succeeds where the provider's strict validation failed.
+    if (/response_format|failed to validate json|json_validate/i.test(body)) {
+      return askWithoutJsonMode({ provider, model, apiKey, system, user, baseUrl, signal }, base, headers);
+    }
     throw new LlmError(explain(res.status, body, provider));
   }
 
@@ -277,6 +296,7 @@ async function askWithoutJsonMode(
     body: JSON.stringify({
       model,
       temperature: 0.2,
+      max_tokens: MAX_OUTPUT_TOKENS,
       messages: [
         { role: "system", content: system },
         { role: "user", content: user },
@@ -303,6 +323,45 @@ export function isBlockedLocalCall(baseUrl: string | undefined, provider: Provid
   if (window.location.protocol !== "https:") return false;
   const target = baseUrl || BASE_URLS.ollama;
   return target.startsWith("http://");
+}
+
+/**
+ * Ask the provider which models this key can actually use.
+ *
+ * Hardcoded lists go stale — Groq in particular retires models, and a student then sees
+ * "the model does not exist" with no way to find a working one. Every provider here exposes
+ * a models endpoint, so the UI can offer the real list instead of our guess.
+ */
+export async function listModels(opts: {
+  provider: ProviderId;
+  apiKey: string;
+  baseUrl?: string;
+  signal?: AbortSignal;
+}): Promise<string[]> {
+  const { provider, apiKey, baseUrl, signal } = opts;
+  if (provider === "shared") return [];
+
+  if (provider === "gemini") {
+    const res = await fetch("https://generativelanguage.googleapis.com/v1beta/models", {
+      headers: { "x-goog-api-key": apiKey },
+      signal,
+    }).catch(() => null);
+    if (!res?.ok) throw new LlmError(res ? explain(res.status, await res.text(), provider) : "Could not reach Gemini.");
+    const json = (await res.json()) as { models?: { name?: string; supportedGenerationMethods?: string[] }[] };
+    return (json.models ?? [])
+      .filter((m) => !m.supportedGenerationMethods || m.supportedGenerationMethods.includes("generateContent"))
+      .map((m) => (m.name ?? "").replace(/^models\//, ""))
+      .filter(Boolean)
+      .sort();
+  }
+
+  const base = (baseUrl || BASE_URLS[provider] || "").replace(/\/+$/, "");
+  const headers: Record<string, string> = {};
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+  const res = await fetch(`${base}/models`, { headers, signal }).catch(() => null);
+  if (!res?.ok) throw new LlmError(res ? explain(res.status, await res.text(), provider) : networkHint(new Error(""), provider, base));
+  const json = (await res.json()) as { data?: { id?: string }[] };
+  return (json.data ?? []).map((m) => m.id ?? "").filter(Boolean).sort();
 }
 
 /** A failed fetch in the browser hides the reason, so guess usefully. */

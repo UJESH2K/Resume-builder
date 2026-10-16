@@ -216,7 +216,17 @@ ${j.text}` : j.text!));
               onChange={(e) => setText(e.target.value)}
             />
           </label>
-          <p className="tailor-hint">{text.trim().length} characters</p>
+          <p className="tailor-hint">
+            {text.trim().length.toLocaleString()} characters
+            {text.trim().length > 8000 && (
+              <>
+                {" — that is a lot to read in one go. Small free models often return broken "}
+                output at this size; if it fails, pick a larger model (Groq&apos;s{" "}
+                <code>openai/gpt-oss-120b</code> or Gemini <code>2.5-flash</code>), or delete
+                the repositories you do not want on the resume.
+              </>
+            )}
+          </p>
 
           <div className="source-row">
             <div className="source-card">

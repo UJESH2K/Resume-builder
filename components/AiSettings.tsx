@@ -1,6 +1,6 @@
 "use client";
 
-import { availableProviders, isBlockedLocalCall, type ProviderId } from "@/lib/ai/providers";
+import { availableProviders, isBlockedLocalCall, listModels, LlmError, type ProviderId } from "@/lib/ai/providers";
 import { useEffect, useState } from "react";
 import type { UseAiConfig } from "@/lib/ai/config";
 
@@ -9,7 +9,7 @@ import type { UseAiConfig } from "@/lib/ai/config";
  * pastes their key once and both features pick it up.
  */
 export function AiSettings({ ai, idSuffix }: { ai: UseAiConfig; idSuffix: string }) {
-  const { cfg, provider, set, switchProvider } = ai;
+  const { cfg, provider, set, switchProvider, ready } = ai;
   const listId = `ai-models-${idSuffix}`;
 
   // Checked after mount: it depends on window.location, which does not exist while rendering
@@ -18,6 +18,36 @@ export function AiSettings({ ai, idSuffix }: { ai: UseAiConfig; idSuffix: string
   useEffect(() => {
     setBlockedLocally(isBlockedLocalCall(cfg.baseUrl, cfg.provider));
   }, [cfg.baseUrl, cfg.provider]);
+
+  // Model names go stale (Groq retires them), so offer the list this key can really use.
+  const [liveModels, setLiveModels] = useState<string[] | null>(null);
+  const [loadingModels, setLoadingModels] = useState(false);
+  const [modelError, setModelError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setLiveModels(null);
+    setModelError(null);
+  }, [cfg.provider, cfg.apiKey]);
+
+  const loadModels = async () => {
+    setLoadingModels(true);
+    setModelError(null);
+    try {
+      const found = await listModels({
+        provider: cfg.provider,
+        apiKey: cfg.apiKey.trim(),
+        baseUrl: cfg.baseUrl.trim() || provider.defaultBaseUrl,
+      });
+      if (!found.length) throw new LlmError("That key returned no models.");
+      setLiveModels(found);
+      // Snap to a working model if the saved one is not in the account's list.
+      if (!found.includes(cfg.model)) set({ model: found[0] });
+    } catch (e) {
+      setModelError((e as Error).message);
+    } finally {
+      setLoadingModels(false);
+    }
+  };
 
   return (
     <>
@@ -102,11 +132,25 @@ export function AiSettings({ ai, idSuffix }: { ai: UseAiConfig; idSuffix: string
           onChange={(e) => set({ model: e.target.value })}
         />
         <datalist id={listId}>
-          {provider.models.map((m) => (
+          {(liveModels ?? provider.models).map((m) => (
             <option key={m} value={m} />
           ))}
         </datalist>
       </label>
+      )}
+
+      {cfg.provider !== "shared" && (
+        <div className="row gap-xs wrap">
+          <button className="btn sm" onClick={loadModels} disabled={loadingModels || !ready}>
+            {loadingModels ? "Checking…" : "Show models my key can use"}
+          </button>
+          {liveModels && (
+            <span className="tailor-or">
+              {liveModels.length} available — click the model box to pick
+            </span>
+          )}
+          {modelError && <span className="auth-err">{modelError}</span>}
+        </div>
       )}
 
       {provider.needsKey && (

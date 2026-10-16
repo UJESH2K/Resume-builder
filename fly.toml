@@ -1,0 +1,45 @@
+# Fly.io deployment. Rename `app` to something unique, then:
+#   fly launch --no-deploy --copy-config
+#   fly deploy --build-arg NEXT_PUBLIC_SUPABASE_URL=... --build-arg NEXT_PUBLIC_SUPABASE_ANON_KEY=...
+#
+# Sizing for a college (~100-200 students, maybe 20-30 editing at once):
+# CPU is the only thing that matters here — one resume costs 3-5 pdflatex runs (~4s on a
+# laptop, slower on a shared vCPU), and the Builder re-previews a couple of seconds after
+# each change. Memory sits well under 1GB.
+#
+# The app keeps nothing on local disk (libraries live in Supabase, LaTeX scratch is per-request
+# temp files), so it scales sideways with no extra work:
+#   fly scale count 3          # three machines behind the load balancer
+#   fly scale vm shared-cpu-4x # or give each machine more CPU
+# Watch `fly logs` and `fly status`; if previews start lagging, add a machine before anything else.
+app = "resume-studio"
+primary_region = "bom"   # Mumbai — closest to Bengaluru
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "3000"
+  # pdflatex runs per machine at once. Keep it at or below the machine's vCPU count:
+  # going higher just makes every student's compile slower instead of failing fast.
+  COMPILE_CONCURRENCY = "2"
+  BUILD_DIR = "/tmp/resume-studio-build"
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  # Suspend rather than stop: resuming is much faster than a cold boot of a TeX-laden image.
+  auto_stop_machines = "suspend"
+  auto_start_machines = true
+  # Two warm machines so a class arriving at once does not queue behind a single CPU.
+  min_machines_running = 2
+
+  [http_service.concurrency]
+    # Queue at the load balancer instead of piling requests onto a busy machine.
+    type = "requests"
+    soft_limit = 12
+    hard_limit = 20
+
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "1gb"

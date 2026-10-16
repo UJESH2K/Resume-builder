@@ -1,0 +1,18 @@
+node_modules
+.next
+.build
+.git
+.github
+output
+*.tsbuildinfo
+
+# Never bake secrets or personal data into the image
+.env
+.env.local
+.env*.local
+data
+
+# Docs are not needed at runtime (HF Spaces needs README.md, so it is kept)
+CLAUDE.md
+AGENTS.md
+DEPLOY-HF.md

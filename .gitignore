@@ -1,0 +1,21 @@
+node_modules/
+.next/
+.build/
+output/
+next-env.d.ts
+*.tsbuildinfo
+
+# Secrets — .env.local.example is the committed template, .env.local is yours.
+.env
+.env.local
+.env*.local
+
+# Personal data. Libraries live in Supabase now; this file is only the local scratch
+# file for `npm run library -- pull/push`, and it holds a real phone number and email.
+# A Hugging Face Space on the free tier is PUBLIC, so this must never be pushed.
+data/resume-db.json
+data/backups/
+
+# The original single-user seed: the whole file is one person's resume content, and it is
+# obsolete now that lib/starter.ts provisions new accounts. Kept locally, never published.
+scripts/seed.ts

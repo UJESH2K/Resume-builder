@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { currentUser, displayName } from "@/lib/auth";
+import { isDemoEmail } from "@/lib/demo";
 import { LibraryConflict, loadLibrary, saveLibrary } from "@/lib/library";
 import { supabaseServer } from "@/lib/supabase/server";
 import type { Db } from "@/lib/types";
@@ -39,7 +40,10 @@ export async function PUT(req: Request) {
 
   const supabase = await supabaseServer();
   try {
-    const rev = await saveLibrary(supabase, user.id, db, force);
+    // The shared demo account skips the rev check. Optimistic locking protects one person
+    // with two tabs; on an account a roomful of people are editing at once it would reject
+    // almost every save. History still records each one, so it stays undoable. See lib/demo.ts.
+    const rev = await saveLibrary(supabase, user.id, db, force || isDemoEmail(user.email));
     return NextResponse.json({ rev });
   } catch (e) {
     if (e instanceof LibraryConflict) return NextResponse.json(e.current, { status: 409 });

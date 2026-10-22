@@ -71,8 +71,14 @@ Needs `SUPABASE_SERVICE_ROLE_KEY` in `.env.local`.
   forwarded host blindly would be an open redirect.
 - `lib/github.ts` + `app/api/github`: username -> public repos + READMEs -> text for the
   importer. The profile repo (`<user>/<user>`) is deliberately kept OUT of the project list and
-  framed as "about me" instead. Budgets matter: 12 repos x 1400 README chars keeps a real
-  profile near ~15k chars (~3.7k tokens) so small free models can still read it.
+  framed as "about me" instead. Reads up to `GITHUB_MAX_REPOS` (default 40) repos, top 15 at
+  2200 README chars and the tail at ~1000, fetched in waves of 8 (GitHub throttles concurrent
+  bursts). Iteration families collapse to their strongest member via `familyKey` —
+  `gradmesh-v3/v4/v5` is one project, not three — and the digest names the superseded repos so
+  the model does not re-add them. The single-call size limit that used to cap this at 12 repos
+  is gone: the importer chunks instead (see `chunkInput`).
+  **Set `GITHUB_TOKEN` for any shared deployment.** The limit is 60 requests/hour per server IP
+  and one import now costs ~40, so without a token the first student exhausts the hour.
 - `app/api/ai`: the only server-side model call — the "no API key" option, using the admin's
   SHARED_AI_TOKEN. Sign-in required, per-user hourly cap, prompt size capped, upstream errors
   never passed through verbatim (they can name the account). Hidden unless
@@ -109,13 +115,41 @@ Needs `SUPABASE_SERVICE_ROLE_KEY` in `.env.local`.
   runs. Strips PATH entries that point at files (breaks MiKTeX). Runs with `-no-shell-escape`
   and `openin_any=p` — note MiKTeX ignores `openin_any`, so that backstop only applies to the
   TeX Live in the Docker image; the escaping in `lib/latex.ts` is the real control.
+  Built for a classroom using it at once: the queue in front of the slots is **bounded**
+  (`COMPILE_QUEUE_MAX`, `COMPILE_QUEUE_WAIT_MS`) and throws `CompileBusy` -> 503 rather than
+  piling requests up invisibly. A finishing job *transfers* its slot to the next waiter instead
+  of releasing it, so nothing slips into the gap and oversubscribes. Finished PDFs are cached
+  on a hash of the exact LaTeX (`COMPILE_CACHE_MAX`), which makes a repeat preview free — most
+  of what a room of students does is look at a preview they already compiled.
 - `app/(app)/*` is the signed-in app (sidebar + DbProvider); `app/login`, `app/signup` are
   outside it. Route groups, so URLs are unchanged.
 - `app/api/db` (GET/PUT), `app/api/db/versions` (GET/POST), `app/api/compile` (modes: preview | pdf | tex).
   Nothing is written to the server's disk — students download their own PDFs.
 - UI shell: `components/AppShell.tsx` (sidebar, breadcrumb `PageHead`, theme toggle, log out); logo at `public/logo.png`.
 - `components/Timeline.tsx` + `lib/dates.ts`: chronological picker; dates are free text, parsed loosely.
-- `components/Builder.tsx` (variants + preview), `components/Library.tsx` (schema-driven editor from `SECTION_DEFS` in `lib/sections.ts`).
+- `components/Builder.tsx` (variants + preview; three views — Sections, Timeline, Score),
+  `components/Library.tsx` (schema-driven editor from `SECTION_DEFS` in `lib/sections.ts`).
+- `lib/quantify.ts`: the "Accomplished [X] as measured by [Y] by doing [Z]" engine from
+  Google's resume deck. Pure regex and vocabulary — no model — so it is free, deterministic,
+  and **cannot invent a metric**. It detects and demands numbers; it never supplies them, which
+  is the whole point. `BulletKind` exempts descriptive lines (coursework, paper abstracts) from
+  the [Y] requirement, because demanding one there teaches students to fabricate.
+- `lib/audit.ts`: whole-resume audit on top of that — section order by career stage
+  (`GOOGLE_ORDER_STUDENT` leads with Education, `GOOGLE_ORDER_EXPERIENCED` with Experience),
+  expected-graduation month+year, the "optional final section" (leadership/awards/publications),
+  contact completeness, project links, bullets per entry, page budget. Score is half structure,
+  half bullet quality, so a tidy resume of unmeasured bullets still scores badly.
+- `components/ScorePanel.tsx`: the Score view. Deliberately a critic, not an author — it points
+  at the gap and names which of [X]/[Y]/[Z] is missing, and never writes the replacement.
+  Computed in the browser, so it updates as they type and costs nothing.
+- `lib/rate-limit.ts`: in-process sliding-window limiter, per user. Single container, so
+  process memory is the whole picture; the limits exist to stop one runaway tab starving a
+  classroom, not to enforce a quota.
+- `lib/demo.ts` + `scripts/demo.ts`: the shared demo account (`DEMO_EMAIL`/`DEMO_USERNAME`/
+  `DEMO_PASSWORD`; absent DEMO_EMAIL, there is no demo at all). It holds a **copy** of a
+  library with the phone and email stripped, so a crowd editing it can never reach the account
+  it came from. Saves are last-write-wins — optimistic locking is right for one person with two
+  tabs and wrong for sixty people on one row — and history still records every save.
 - Check types with `npx tsc --noEmit`. Deployment lives in `Dockerfile` / `fly.toml`: the app
   needs a real container because `pdflatex` cannot run on Vercel-style serverless.
 

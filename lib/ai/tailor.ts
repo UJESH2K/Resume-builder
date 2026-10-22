@@ -1,4 +1,5 @@
 import type { JobRole } from "../roles";
+import { summarize } from "../quantify";
 import { itemsOf, normalizeVariant, SECTION_ORDER, selectByTags } from "../sections";
 import type { Bullet, Db, SectionKey, Variant } from "../types";
 import { LlmError, parseJsonObject } from "./providers";
@@ -213,6 +214,25 @@ function score(tags: string[], roleTags: string[]): number {
 }
 
 /**
+ * How well an entry is written, as a tie-breaker when trimming.
+ *
+ * Relevance decides first — a tagged match beats a polished irrelevance — but two entries are
+ * often equally relevant, and then the one whose bullets carry measures is the better thing
+ * to put on the page. This is the one place the quantification engine changes what a resume
+ * contains rather than just reporting on it, and it is a reordering only: an entry is never
+ * dropped for being badly written while a relevant slot is free.
+ *
+ * Returned on a 0-1 scale so it can only ever break a tie in the integer relevance score.
+ */
+function writingQuality(item: Record<string, unknown> | undefined): number {
+  const bullets = ((item?.bullets as { text?: string }[] | undefined) ?? [])
+    .map((b) => String(b?.text ?? ""))
+    .filter(Boolean);
+  if (!bullets.length) return 0;
+  return summarize(bullets).average / 100;
+}
+
+/**
  * Keep the best `cap` entries per section, most relevant first.
  *
  * Ties keep the library's own order, which the student curated. When ids are already ordered
@@ -232,8 +252,17 @@ function trimToBudget(db: Db, variant: Variant, roleTags: string[], pages: numbe
       if (!preserveOrder.has(s.key)) {
         const byId = new Map(itemsOf(db, s.key).map((i) => [i.id, i]));
         ordered = s.items
-          .map((id, i) => ({ id, i, sc: score(byId.get(id)?.tags ?? [], roleTags) }))
-          .sort((a, b) => b.sc - a.sc || a.i - b.i)
+          .map((id, i) => {
+            const item = byId.get(id);
+            return {
+              id,
+              i,
+              sc: score(item?.tags ?? [], roleTags),
+              q: writingQuality(item as unknown as Record<string, unknown>),
+            };
+          })
+          // Relevance, then how well it is written, then the student's own order.
+          .sort((a, b) => b.sc - a.sc || b.q - a.q || a.i - b.i)
           .map((x) => x.id);
       }
       const items = ordered.slice(0, cap);

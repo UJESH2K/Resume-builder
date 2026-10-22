@@ -2,6 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
+import { resolveLoginEmail } from "@/lib/demo";
 import { supabaseServer } from "@/lib/supabase/server";
 
 export interface AuthState {
@@ -77,9 +78,13 @@ export async function signUp(_prev: AuthState, formData: FormData): Promise<Auth
 }
 
 export async function signIn(_prev: AuthState, formData: FormData): Promise<AuthState> {
-  const email = String(formData.get("email") ?? "").trim().toLowerCase();
+  const entered = String(formData.get("email") ?? "").trim().toLowerCase();
   const password = String(formData.get("password") ?? "");
-  const values = { email };
+  // Keep what they typed in `values`, so a failed demo login redisplays "demo" and not the
+  // account's real address.
+  const values = { email: entered };
+  // Lets the shared demo account be reached by a username instead of an email address.
+  const email = resolveLoginEmail(entered);
 
   if (!email || !password) return { error: "Enter your email and password.", values };
 

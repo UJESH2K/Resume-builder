@@ -1,5 +1,6 @@
 import "server-only";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -24,18 +25,129 @@ const BUILD_DIR = process.env.BUILD_DIR || path.join(os.tmpdir(), "resume-studio
  */
 const CONCURRENCY = Math.max(1, Number(process.env.COMPILE_CONCURRENCY || 2));
 
-let active = 0;
-const waiting: (() => void)[] = [];
+/**
+ * The queue in front of those slots, and why it is bounded.
+ *
+ * With a room full of students the arrival rate is bursty: every keystroke in the Builder
+ * schedules a preview, and one preview is three to five pdflatex runs. An unbounded queue
+ * turns that into a silent pile-up — requests sit holding sockets and memory until the
+ * browser gives up, and nobody is told anything. A bounded queue with a wait deadline fails
+ * loudly instead, so the route can answer "busy, try again" while the server is still healthy.
+ */
+const QUEUE_MAX = Math.max(CONCURRENCY, Number(process.env.COMPILE_QUEUE_MAX || 60));
+const QUEUE_WAIT_MS = Math.max(2_000, Number(process.env.COMPILE_QUEUE_WAIT_MS || 25_000));
 
-/** Run `fn` once a compile slot frees up. */
+/** Thrown when the queue is full or a request waited past the deadline. The route maps it to 503. */
+export class CompileBusy extends Error {
+  constructor(
+    public readonly queued: number,
+    public readonly reason: "full" | "timeout"
+  ) {
+    super(
+      reason === "full"
+        ? `Too many resumes compiling at once (${queued} waiting).`
+        : `Waited too long for a compile slot (${queued} ahead).`
+    );
+    this.name = "CompileBusy";
+  }
+}
+
+let active = 0;
+/** Waiters in arrival order. `release` resolves them; `fail` rejects on the deadline. */
+const waiting: { release: () => void; fail: (e: Error) => void }[] = [];
+
+/** What the route reports back so the UI can say "3 ahead of you" instead of just spinning. */
+export const queueStats = () => ({ active, waiting: waiting.length, concurrency: CONCURRENCY, max: QUEUE_MAX });
+
+/**
+ * Run `fn` once a compile slot frees up, or give up rather than queue forever.
+ *
+ * A finishing job hands its slot directly to the next waiter instead of releasing it and
+ * letting the waiter claim one. Those are not the same thing: between a release and the
+ * waiter actually resuming there is a turn of the event loop, and a request arriving in that
+ * gap would see a free slot and take it, putting two jobs in one slot. Transferring keeps
+ * `active` correct at every instant, which is what makes the concurrency cap mean anything.
+ */
 async function withSlot<T>(fn: () => Promise<T>): Promise<T> {
-  if (active >= CONCURRENCY) await new Promise<void>((resolve) => waiting.push(resolve));
-  active++;
+  if (active >= CONCURRENCY) {
+    if (waiting.length >= QUEUE_MAX) throw new CompileBusy(waiting.length, "full");
+    // Resolving means the slot is already ours — the job that finished counted it for us.
+    await new Promise<void>((resolve, reject) => {
+      const entry = {
+        release: () => {
+          clearTimeout(timer);
+          resolve();
+        },
+        fail: (e: Error) => {
+          clearTimeout(timer);
+          reject(e);
+        },
+      };
+      const timer = setTimeout(() => {
+        // Leave the queue before rejecting: a waiter that has given up must not be handed a
+        // slot afterwards, or that slot is leaked and `active` never returns to zero.
+        const at = waiting.indexOf(entry);
+        if (at >= 0) waiting.splice(at, 1);
+        entry.fail(new CompileBusy(waiting.length, "timeout"));
+      }, QUEUE_WAIT_MS);
+      waiting.push(entry);
+    });
+  } else {
+    active++;
+  }
+
   try {
     return await fn();
   } finally {
-    active--;
-    waiting.shift()?.();
+    const next = waiting.shift();
+    if (next) next.release(); // hand the slot straight over; `active` stays as it is
+    else active--;
+  }
+}
+
+/**
+ * Finished PDFs, keyed by a hash of the exact LaTeX that produced them.
+ *
+ * The Builder re-previews on a timer, and the auto-fit ladder walks the same steps in the
+ * same order every time, so an unchanged resume asks for byte-identical LaTeX again and
+ * again. Caching that turns a repeat preview from three-to-five pdflatex runs into zero —
+ * which is most of the load a room of students generates, because most of what they do is
+ * look at a preview they have already compiled.
+ *
+ * Keyed on the LaTeX itself, so it cannot serve one student's resume to another: different
+ * content is a different key. Bounded in entries rather than bytes, which is crude but
+ * predictable — a resume PDF is a couple of hundred KB.
+ */
+/** Hard ceiling on one pdflatex run. See the call site for why it is far below the old 120s. */
+const COMPILE_TIMEOUT_MS = Math.max(5_000, Number(process.env.COMPILE_TIMEOUT_MS || 30_000));
+
+const CACHE_MAX = Math.max(0, Number(process.env.COMPILE_CACHE_MAX || 150));
+const CACHE_TTL_MS = Math.max(0, Number(process.env.COMPILE_CACHE_TTL_MS || 15 * 60_000));
+type Cached = { pdf: Buffer; pages: number; overflows: number; at: number };
+const cache = new Map<string, Cached>();
+
+const texKey = (tex: string) => createHash("sha256").update(tex).digest("hex");
+
+function cacheGet(key: string): Cached | null {
+  const hit = cache.get(key);
+  if (!hit) return null;
+  if (CACHE_TTL_MS && Date.now() - hit.at > CACHE_TTL_MS) {
+    cache.delete(key);
+    return null;
+  }
+  // Re-insert so iteration order is least-recently-used first.
+  cache.delete(key);
+  cache.set(key, hit);
+  return hit;
+}
+
+function cachePut(key: string, value: Cached): void {
+  if (!CACHE_MAX) return;
+  cache.set(key, value);
+  while (cache.size > CACHE_MAX) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
   }
 }
 
@@ -202,6 +314,12 @@ export interface CompileResult {
 }
 
 export function compile(tex: string, jobDir: string): Promise<CompileResult> {
+  // Checked before queueing, not inside the slot: a cache hit must not wait behind other
+  // students' compiles, since serving it costs nothing.
+  const key = texKey(tex);
+  const hit = cacheGet(key);
+  if (hit) return Promise.resolve({ ok: true, pdf: hit.pdf, pages: hit.pages, overflows: hit.overflows, tex });
+
   return withSlot(async () => {
     // turbopackIgnore on these: BUILD_DIR is a runtime value (temp dir), so the bundler
     // cannot resolve it and would otherwise trace the entire project into the standalone
@@ -216,14 +334,18 @@ export function compile(tex: string, jobDir: string): Promise<CompileResult> {
         // Same reason as the path.join calls above: `bin` and `cwd` are runtime values.
         /* turbopackIgnore: true */ bin,
         ["-interaction=nonstopmode", "-halt-on-error", "-file-line-error", "-no-shell-escape", "resume.tex"],
-        { cwd: dir, env: texEnv(), timeout: 120_000, maxBuffer: 20 * 1024 * 1024, windowsHide: true },
+        // 30s, not the old 120s: a resume that has not compiled in 30 seconds is not going to,
+        // and under load a stuck job holding a slot for two minutes stalls everyone behind it.
+        { cwd: dir, env: texEnv(), timeout: COMPILE_TIMEOUT_MS, maxBuffer: 20 * 1024 * 1024, windowsHide: true },
         (err, stdout, stderr) => resolve(`${stdout}\n${stderr}${err && !stdout ? `\n${err.message}` : ""}`)
       );
     });
     try {
       const pdf = await fs.readFile(path.join(/* turbopackIgnore: true */ dir, "resume.pdf"));
       const pages = Number(/Output written on .*?\((\d+) pages?/.exec(log)?.[1] ?? 0);
-      return { ok: true, pdf, pages, overflows: overflowWarnings(log), tex };
+      const overflows = overflowWarnings(log);
+      cachePut(key, { pdf, pages, overflows, at: Date.now() });
+      return { ok: true, pdf, pages, overflows, tex };
     } catch {
       return { ok: false, log: extractErrors(log), tex };
     }

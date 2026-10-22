@@ -6,10 +6,40 @@ import "server-only";
  * Kept out of the route handler so it can be tested without faking a signed-in request.
  */
 
-/** How many repos we describe. Beyond this the prompt gets expensive and the tail is noise. */
-const MAX_REPOS = 12;
-/** Per-README budget. Enough for the intro and feature list, which is the useful part. */
-const README_CHARS = 1400;
+/**
+ * How many repos we describe.
+ *
+ * This used to be 12, chosen to keep one profile near ~15k characters so the smallest free
+ * models could still read it in a single call. That was the wrong trade for someone with 70
+ * repositories: the twelve-repo ceiling silently threw away most of their work, and no
+ * student could tell why their resume only knew about a dozen projects.
+ *
+ * The importer now reads the digest in chunks (see lib/ai/extract.ts), so the single-call
+ * size limit no longer sets this number. What sets it is usefulness: past about forty repos
+ * a student's tail is coursework and forks, and the scoring below already ranks those last.
+ */
+const MAX_REPOS = Math.max(1, Number(process.env.GITHUB_MAX_REPOS || 40));
+
+/**
+ * Per-README budget, tiered.
+ *
+ * A README's useful part is the opening paragraph and the feature list, but for the few repos
+ * that matter most it is worth reading further in — that is where the architecture notes and
+ * the numbers live, and numbers are what the resume is short of. The tail of the list gets a
+ * smaller slice: enough to tell what the project is, not enough to crowd out the leaders.
+ */
+const README_CHARS_TOP = Math.max(400, Number(process.env.GITHUB_README_CHARS || 2200));
+const README_CHARS_TAIL = Math.round(README_CHARS_TOP * 0.45);
+/** How many repos get the larger budget. */
+const TOP_TIER = 15;
+
+/**
+ * READMEs are fetched in waves rather than all at once. GitHub applies a secondary,
+ * undocumented limit to bursts of concurrent requests from one token, and forty parallel
+ * fetches is squarely in that territory — it returns 403s that look like rate limiting.
+ */
+const FETCH_BATCH = Math.max(1, Number(process.env.GITHUB_FETCH_BATCH || 8));
+
 const TIMEOUT_MS = 25_000;
 
 interface Repo {
@@ -49,6 +79,25 @@ const monthYear = (iso: string) => {
     : d.toLocaleString("en", { month: "short", year: "numeric" });
 };
 
+/**
+ * The stem of a repo name, with any "which attempt is this" suffix removed.
+ *
+ * Students iterate in public: gradmesh, gradmesh-v2, Gradmesh-v5, gradmesh-final. Those are
+ * one project with five commits of history, not five projects, and importing them separately
+ * produces a resume with the same entry three times. Keeping only the strongest of each family
+ * is both a better resume and a cheaper import.
+ */
+function familyKey(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[_\s]+/g, "-")
+    .replace(/-(?:v?\d+|final|latest|new|old|copy|backup|test|demo|clone|fork|rev\d*)$/g, "")
+    .replace(/-+$/, "")
+    .replace(/\d+$/, "")
+    .replace(/-+$/, "")
+    || name.toLowerCase();
+}
+
 /** Interesting first: real projects before forks, popular and substantial before trivial. */
 function score(r: Repo): number {
   let n = 0;
@@ -67,7 +116,7 @@ function score(r: Repo): number {
   return n;
 }
 
-async function readme(fullName: string, signal: AbortSignal): Promise<string> {
+async function readme(fullName: string, signal: AbortSignal, budget: number): Promise<string> {
   try {
     const res = await fetch(`https://api.github.com/repos/${fullName}/readme`, {
       headers: { ...(headers() as Record<string, string>), Accept: "application/vnd.github.raw" },
@@ -89,11 +138,21 @@ async function readme(fullName: string, signal: AbortSignal): Promise<string> {
         .replace(/^[ \t]+$/gm, "")
         .replace(/\n{3,}/g, "\n\n")
         .trim()
-        .slice(0, README_CHARS)
+        .slice(0, budget)
     );
   } catch {
     return "";
   }
+}
+
+/** Map over `items` `FETCH_BATCH` at a time — see FETCH_BATCH for why not all at once. */
+async function inBatches<T, R>(items: T[], fn: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  const out: R[] = [];
+  for (let i = 0; i < items.length; i += FETCH_BATCH) {
+    const slice = items.slice(i, i + FETCH_BATCH);
+    out.push(...(await Promise.all(slice.map((item, j) => fn(item, i + j)))));
+  }
+  return out;
 }
 
 export interface GithubDigest {
@@ -102,6 +161,8 @@ export interface GithubDigest {
   totalRepos: number;
   used: number;
   withReadme: number;
+  /** Repos ranked below the cut, so the student can see what was left out and why. */
+  skipped: string[];
 }
 
 export class GithubError extends Error {
@@ -153,12 +214,24 @@ export async function readGithubProfile(username: string, signal: AbortSignal): 
   const profileRepo = all.find(isProfileRepo);
   const projects = all.filter((r) => !isProfileRepo(r));
 
-  const chosen = [...projects].sort((a, b) => score(b) - score(a)).slice(0, MAX_REPOS);
-  // READMEs in parallel — one at a time would blow the timeout on a dozen repos.
-  const [readmes, profileReadme] = await Promise.all([
-    Promise.all(chosen.map((r) => readme(r.full_name, signal))),
-    profileRepo ? readme(profileRepo.full_name, signal) : Promise.resolve(""),
-  ]);
+  // Collapse iteration families to their strongest member, keeping the names of the rest so
+  // the digest can say "earlier iterations: …" instead of pretending they never existed.
+  const families = new Map<string, Repo[]>();
+  for (const r of [...projects].sort((a, b) => score(b) - score(a))) {
+    const key = familyKey(r.name);
+    families.set(key, [...(families.get(key) ?? []), r]);
+  }
+  const ranked = [...families.values()].map((group) => group[0]).sort((a, b) => score(b) - score(a));
+  const supersededBy = new Map<string, string[]>();
+  for (const group of families.values()) {
+    if (group.length > 1) supersededBy.set(group[0].name, group.slice(1).map((r) => r.name));
+  }
+
+  const chosen = ranked.slice(0, MAX_REPOS);
+  const profileReadme = profileRepo ? await readme(profileRepo.full_name, signal, README_CHARS_TOP) : "";
+  const readmes = await inBatches(chosen, (r, i) =>
+    readme(r.full_name, signal, i < TOP_TIER ? README_CHARS_TOP : README_CHARS_TAIL)
+  );
 
   const languages = [...new Set(all.map((r) => r.language).filter(Boolean))] as string[];
   const topics = [...new Set(chosen.flatMap((r) => r.topics ?? []))].slice(0, 25);
@@ -180,7 +253,13 @@ export async function readGithubProfile(username: string, signal: AbortSignal): 
     );
   }
 
-  lines.push("PROJECTS (most significant first):", "");
+  lines.push(
+    "PROJECTS (most significant first).",
+    "Any figure that belongs on the resume must come from the text below — a dataset size, a",
+    "benchmark, a user or star count, a latency. Where a repo states none, describe it without",
+    "a number rather than guessing one.",
+    ""
+  );
 
   chosen.forEach((r, i) => {
     const meta = [
@@ -197,6 +276,12 @@ export async function readGithubProfile(username: string, signal: AbortSignal): 
     lines.push(`--- ${i + 1}. ${r.name}`);
     if (r.description) lines.push(`Description: ${r.description}`);
     lines.push(`Details: ${meta}`);
+    const earlier = supersededBy.get(r.name);
+    if (earlier?.length) {
+      lines.push(
+        `Earlier iterations of this same project (do NOT make separate entries for them): ${earlier.join(", ")}`
+      );
+    }
     lines.push(`Code: ${r.html_url}`);
     if (r.homepage) lines.push(`Live: ${r.homepage}`);
     if (r.topics?.length) lines.push(`Tags: ${r.topics.join(", ")}`);
@@ -212,5 +297,6 @@ ${readmes[i]}`);
     totalRepos: all.length,
     used: chosen.length,
     withReadme: readmes.filter(Boolean).length,
+    skipped: ranked.slice(MAX_REPOS).map((r) => r.name),
   };
 }

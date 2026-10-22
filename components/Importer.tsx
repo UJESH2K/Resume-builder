@@ -5,8 +5,10 @@ import { useMemo, useRef, useState } from "react";
 import { useAiConfig } from "@/lib/ai/config";
 import {
   buildExtractPrompt,
+  chunkInput,
   EXTRACT_SYSTEM,
   looksDuplicate,
+  mergeExtractions,
   mergeIntoLibrary,
   parseExtraction,
   previewLabel,
@@ -51,7 +53,12 @@ export function Importer() {
   const [accepted, setAccepted] = useState<Set<string>>(new Set());
   const [takeProfile, setTakeProfile] = useState(true);
   const [saved, setSaved] = useState<number | null>(null);
+  /** "Reading part 2 of 5" — a 70-repo profile is several model calls, not one. */
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const abort = useRef<AbortController | null>(null);
+
+  /** How many model calls the current text will take — shown before they commit to waiting. */
+  const chunkCount = useMemo(() => chunkInput(text).length, [text]);
 
   const duplicates = useMemo(() => {
     const out = new Set<string>();
@@ -103,16 +110,22 @@ export function Importer() {
         totalRepos?: number;
         used?: number;
         withReadme?: number;
+        skipped?: string[];
       };
       if (!r.ok || !j.text) throw new Error(j.error ?? "Could not read that GitHub profile.");
       // Append, so a student can combine GitHub with their own notes about internships.
       setText((prev) => (prev.trim() ? `${prev.trim()}
 
 ${j.text}` : j.text!));
+      const left = j.skipped?.length ?? 0;
       setGhInfo(
         `Read ${j.used} of ${j.totalRepos} public repos (${j.withReadme} had a README). ` +
-          `Check the text below, add anything GitHub does not know about — internships, ` +
-          `college, hackathons — then turn it into entries.`
+          (left
+            ? `${left} ranked below the cut — forks, empty or inactive repos — and were left out: ` +
+              `${j.skipped!.slice(0, 8).join(", ")}${left > 8 ? `, +${left - 8} more` : ""}. ` +
+              `Paste any of those in yourself if they belong on the resume. `
+            : "") +
+          `Now add what GitHub cannot know — internships, college, hackathons, papers — then turn it into entries.`
       );
     } catch (e) {
       setError((e as Error).message);
@@ -136,18 +149,57 @@ ${j.text}` : j.text!));
     setExtracted(null);
     setSaved(null);
     abort.current = new AbortController();
+
+    /**
+     * A full GitHub profile is far more text than any one call should carry, so it is read in
+     * chunks and the results merged. Chunks run one at a time rather than in parallel: free
+     * tiers rate limit hard, and five simultaneous calls is the fastest way to get all five
+     * refused.
+     */
+    const chunks = chunkInput(text);
+    setProgress(chunks.length > 1 ? { done: 0, total: chunks.length } : null);
+
+    const parts: Extracted[] = [];
+    const failures: string[] = [];
     try {
-      const raw = await ask({
-        provider: ai.cfg.provider,
-        model: ai.cfg.model.trim() || ai.provider.models[0],
-        apiKey: ai.cfg.apiKey.trim(),
-        baseUrl: ai.cfg.baseUrl.trim() || ai.provider.defaultBaseUrl,
-        system: EXTRACT_SYSTEM,
-        user: buildExtractPrompt(text),
-        signal: abort.current.signal,
-      });
-      const found = parseExtraction(raw);
+      for (let i = 0; i < chunks.length; i++) {
+        if (abort.current?.signal.aborted) break;
+        try {
+          const raw = await ask({
+            provider: ai.cfg.provider,
+            model: ai.cfg.model.trim() || ai.provider.models[0],
+            apiKey: ai.cfg.apiKey.trim(),
+            baseUrl: ai.cfg.baseUrl.trim() || ai.provider.defaultBaseUrl,
+            system: EXTRACT_SYSTEM,
+            user: buildExtractPrompt(chunks[i]),
+            signal: abort.current!.signal,
+          });
+          parts.push(parseExtraction(raw));
+        } catch (e) {
+          // One bad chunk must not throw away the other four. Small models return broken JSON
+          // often enough that an all-or-nothing import would fail most large profiles.
+          if ((e as Error)?.name === "AbortError") throw e;
+          failures.push(`part ${i + 1}: ${(e as Error).message}`);
+        }
+        setProgress(chunks.length > 1 ? { done: i + 1, total: chunks.length } : null);
+      }
+
+      if (!parts.length) {
+        throw new LlmError(
+          failures[0]
+            ? `Could not read any of it. ${failures[0]}`
+            : "Nothing usable came back. Try a larger model."
+        );
+      }
+
+      const found = mergeExtractions(parts);
       setExtracted(found);
+      if (failures.length) {
+        setError(
+          `Read ${parts.length} of ${chunks.length} parts — ${failures.length} failed and ` +
+            `whatever was in them is missing below. A larger model usually fixes this. (${failures[0]})`
+        );
+      }
       // Pre-tick everything that is not already in the library.
       const next = new Set<string>();
       for (const { key, items } of found.sections) {
@@ -155,9 +207,12 @@ ${j.text}` : j.text!));
       }
       setAccepted(next);
     } catch (e) {
-      setError(e instanceof LlmError ? e.message : `Something went wrong: ${(e as Error).message}`);
+      if ((e as Error)?.name !== "AbortError") {
+        setError(e instanceof LlmError ? e.message : `Something went wrong: ${(e as Error).message}`);
+      }
     } finally {
       setBusy("");
+      setProgress(null);
       abort.current = null;
     }
   };
@@ -218,12 +273,12 @@ ${j.text}` : j.text!));
           </label>
           <p className="tailor-hint">
             {text.trim().length.toLocaleString()} characters
-            {text.trim().length > 8000 && (
+            {chunkCount > 1 && (
               <>
-                {" — that is a lot to read in one go. Small free models often return broken "}
-                output at this size; if it fails, pick a larger model (Groq&apos;s{" "}
-                <code>openai/gpt-oss-120b</code> or Gemini <code>2.5-flash</code>), or delete
-                the repositories you do not want on the resume.
+                {` — read in ${chunkCount} passes, one model call each, and merged. `}
+                Expect it to take around {chunkCount * 15}s. If some passes come back broken,
+                switch to a larger model (Groq&apos;s <code>openai/gpt-oss-120b</code> or Gemini{" "}
+                <code>2.5-flash</code>).
               </>
             )}
           </p>
@@ -281,7 +336,11 @@ ${j.text}` : j.text!));
           <AiSettings ai={ai} idSuffix="import" />
           <div className="row gap-xs wrap">
             <button className="btn primary" onClick={read} disabled={busy !== "" || text.trim().length < 40}>
-              {busy === "read" ? "Reading…" : "Turn this into library entries"}
+              {busy !== "read"
+                ? "Turn this into library entries"
+                : progress
+                  ? `Reading part ${Math.min(progress.done + 1, progress.total)} of ${progress.total}…`
+                  : "Reading…"}
             </button>
             {busy === "read" && (
               <button className="btn sm ghost" onClick={() => abort.current?.abort()}>

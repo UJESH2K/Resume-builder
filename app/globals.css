@@ -1752,3 +1752,280 @@ button.bullet-count {
 .welcome-body .btn {
   margin-top: 6px;
 }
+
+/* ---------------------------------------------------------------- resume score
+   The Google-framework audit panel (components/ScorePanel.tsx). Severity colours reuse the
+   existing --ok / --warn / --danger tokens so the panel reads the same in both themes. */
+
+.btn.xs {
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.score-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.score-top {
+  display: flex;
+  gap: 18px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.score-ring {
+  position: relative;
+  width: 112px;
+  height: 112px;
+  flex: none;
+  display: grid;
+  place-items: center;
+}
+.score-ring svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  /* Start the arc at twelve o'clock rather than three. */
+  transform: rotate(-90deg);
+}
+.score-track {
+  fill: none;
+  stroke: var(--panel-2);
+  stroke-width: 7;
+}
+.score-fill {
+  fill: none;
+  stroke: var(--brand);
+  stroke-width: 7;
+  stroke-linecap: round;
+  transition: stroke-dashoffset var(--med) var(--ease-soft);
+}
+.score-ring.tone-ok .score-fill {
+  stroke: var(--ok);
+}
+.score-ring.tone-fit .score-fill {
+  stroke: var(--accent-hit);
+}
+.score-ring.tone-warn .score-fill {
+  stroke: var(--warn);
+}
+.score-ring.tone-bad .score-fill {
+  stroke: var(--danger);
+}
+
+.score-number {
+  text-align: center;
+  line-height: 1.05;
+  margin-top: -10px;
+}
+.score-number strong {
+  display: block;
+  font-size: 30px;
+  letter-spacing: -0.02em;
+}
+.score-number span {
+  font-size: 11px;
+  color: var(--faint);
+}
+.score-grade {
+  position: absolute;
+  bottom: 12px;
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin: 0;
+}
+
+.score-stats {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+.score-stats p {
+  margin: 0 0 7px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+.score-stats strong {
+  color: var(--text);
+}
+
+/* --- the checklist --- */
+
+.check-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.check-row {
+  display: flex;
+  gap: 10px;
+  padding: 9px 10px;
+  border-radius: var(--r-sm);
+  align-items: flex-start;
+}
+.check-row.fail {
+  background: var(--danger-soft);
+}
+.check-row.warn {
+  background: var(--warn-soft);
+}
+.check-row.pass {
+  background: transparent;
+}
+.check-row > div {
+  min-width: 0;
+}
+.check-row strong {
+  font-size: 13px;
+  display: block;
+}
+.check-icon {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+  margin-top: 1px;
+}
+.check-row.fail .check-icon {
+  background: var(--danger);
+}
+.check-row.warn .check-icon {
+  background: var(--warn);
+}
+.check-row.pass .check-icon {
+  background: var(--ok);
+}
+.check-detail {
+  margin: 2px 0 0;
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.check-fix {
+  margin: 4px 0 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text);
+}
+.check-row.pass .check-fix {
+  display: none;
+}
+
+/* --- weak bullets --- */
+
+.weak-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.weak-row {
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: var(--r-sm);
+  padding: 10px 12px;
+  background: var(--panel);
+}
+.weak-row.grade-weak {
+  border-left-color: var(--danger);
+}
+.weak-row.grade-fair {
+  border-left-color: var(--warn);
+}
+.weak-head {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+.weak-where {
+  font-size: 12px;
+  color: var(--muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.weak-grade {
+  font-size: 11px;
+  color: var(--faint);
+  margin-left: auto;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.weak-text {
+  margin: 0 0 7px;
+  font-size: 13px;
+  line-height: 1.55;
+}
+.weak-has {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.weak-has code {
+  background: var(--ok-soft);
+  color: var(--ok);
+  border-radius: 4px;
+  padding: 1px 5px;
+  margin-right: 4px;
+  font-size: 11.5px;
+}
+.weak-gaps {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.weak-gaps li {
+  font-size: 12.5px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.weak-issue {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--warn);
+  line-height: 1.5;
+}
+
+/* Demo sign-in block on the login card. */
+.auth-demo {
+  margin-top: 4px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.auth-demo small {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+.auth-demo code {
+  background: var(--panel-2);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 11.5px;
+}

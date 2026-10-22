@@ -60,8 +60,17 @@ export const SECTION_DEFS: Record<SectionKey, SectionDef> = {
       { key: "degree", label: "Degree", type: "text", placeholder: "B.Tech in Computer Science & Engineering" },
       { key: "score", label: "CGPA / Score", type: "text", placeholder: "7.7/10 CGPA", half: true },
       { key: "location", label: "Location", type: "text", half: true },
-      { key: "start", label: "Start", type: "text", placeholder: "2022", half: true },
-      { key: "end", label: "End", type: "text", placeholder: "2026", half: true },
+      { key: "start", label: "Start", type: "text", placeholder: "Aug 2023", half: true },
+      // Month AND year, phrased as "Expected" while still studying: the thing a recruiter
+      // reading a recent graduate looks for is when you are actually available. "Present"
+      // does not answer that. See the graduation check in lib/audit.ts.
+      {
+        key: "end",
+        label: "End (month + year, or “Expected May 2027”)",
+        type: "text",
+        placeholder: "Expected May 2027",
+        half: true,
+      },
       bulletsField,
       tagsField,
       noteField,

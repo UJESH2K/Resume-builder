@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { applyPlan, type AppliedPlan, type TailorPlan } from "@/lib/ai/tailor";
 import type { JobRole } from "@/lib/roles";
 import { ACCENTS, SECTION_DEFS, allTags, blankVariant, itemsOf, matchesTags, selectByTags, uid } from "@/lib/sections";
+import { ScorePanel } from "./ScorePanel";
 import { Tailor } from "./Tailor";
 import { Welcome } from "./Welcome";
 import type { AnyItem, Bullet, Db, Variant, VariantSection } from "@/lib/types";
@@ -25,6 +26,9 @@ interface Preview {
 const LS_KEY = "resume-studio:variant";
 const LS_VIEW = "resume-studio:view";
 
+/** Sections = pick what goes on; Timeline = chronological picker; Score = the Google audit. */
+type BuilderView = "sections" | "timeline" | "score";
+
 export function Builder() {
   const { db, update } = useDb();
   const [vid, setVid] = useState<string>("");
@@ -32,7 +36,7 @@ export function Builder() {
   const [filter, setFilter] = useState("");
   const [onlyMatching, setOnlyMatching] = useState(false);
   const [auto, setAuto] = useState(true);
-  const [view, setView] = useState<"sections" | "timeline">("sections");
+  const [view, setView] = useState<BuilderView>("sections");
   const [busy, setBusy] = useState(false);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -51,11 +55,11 @@ export function Builder() {
     try {
       const fromUrl = new URLSearchParams(window.location.search).get("view");
       const v = fromUrl ?? localStorage.getItem(LS_VIEW);
-      if (v === "timeline" || v === "sections") setView(v);
+      if (v === "timeline" || v === "sections" || v === "score") setView(v as BuilderView);
     } catch {}
   }, []);
 
-  const pickView = (v: "sections" | "timeline") => {
+  const pickView = (v: BuilderView) => {
     setView(v);
     try {
       localStorage.setItem(LS_VIEW, v);
@@ -94,8 +98,24 @@ export function Builder() {
           body: JSON.stringify({ db, variantId: vid, mode }),
         });
         if (!r.ok) {
-          const j = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
-          if (id === reqId.current) setError(`${j.error}\n\n${j.log ?? ""}`.trim());
+          const j = (await r.json().catch(() => ({ error: `HTTP ${r.status}` }))) as {
+            error?: string;
+            log?: string;
+            busy?: boolean;
+          };
+          if (id !== reqId.current) return;
+          // 503 (server at capacity) and 429 (this account is compiling too often) are both
+          // "wait a moment", not "your resume is broken" — so they must not read like a LaTeX
+          // error, and auto-recompile has to stop or it hammers a server already in trouble.
+          if (r.status === 503 || r.status === 429) {
+            setAuto(false);
+            setError(
+              `${j.error ?? "The compiler is busy."}\n\nAuto-recompile has been paused so it is not made worse. ` +
+                `Press Recompile when you are ready — nothing in your library is lost.`
+            );
+            return;
+          }
+          setError(`${j.error}\n\n${j.log ?? ""}`.trim());
           return;
         }
         const blob = await r.blob();
@@ -239,6 +259,18 @@ export function Builder() {
   const skillsIdx = variant.sections.findIndex((s) => s.key === "skills");
   const expIdx = variant.sections.findIndex((s) => s.key === "experience");
   const skillsBelowExperience = skillsIdx > expIdx;
+  /**
+   * Reorder this variant's sections into the order the score panel recommends.
+   *
+   * Sections not named in the order keep their relative position at the end, so a section
+   * added to the app later cannot be silently dropped from a student's resume.
+   */
+  const applySectionOrder = (order: string[]) =>
+    editVariant((v) => {
+      const rank = new Map(order.map((k, i) => [k, i]));
+      v.sections.sort((a, b) => (rank.get(a.key) ?? 999) - (rank.get(b.key) ?? 999));
+    });
+
   /** Move Skills directly above Experience — the usual fix when a resume spills onto page two. */
   const swapSkills = () =>
     editVariant((v) => {
@@ -266,6 +298,9 @@ export function Builder() {
             </button>
             <button className={view === "timeline" ? "active" : ""} onClick={() => pickView("timeline")}>
               Timeline
+            </button>
+            <button className={view === "score" ? "active" : ""} onClick={() => pickView("score")}>
+              Score
             </button>
           </div>
         }
@@ -398,7 +433,9 @@ export function Builder() {
           </div>
         </div>
 
-        {view === "timeline" ? (
+        {view === "score" ? (
+          <ScorePanel db={db} variant={variant} pages={preview?.pages} onReorder={applySectionOrder} />
+        ) : view === "timeline" ? (
           <Timeline db={db} variant={variant} editVariant={editVariant} />
         ) : (
           <>

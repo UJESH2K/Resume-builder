@@ -1,3 +1,4 @@
+import { XYZ_RULES } from "../quantify";
 import { newBullet, uid } from "../sections";
 import type { Bullet, Db, SectionKey } from "../types";
 import { LlmError, parseJsonObject } from "./providers";
@@ -24,12 +25,64 @@ const MAX = {
   label: 160,
   bullet: 300,
   bullets: 6,
-  perSection: 12,
+  /**
+   * Entries accepted per section per call.
+   *
+   * Was 12 across the board, which quietly truncated anyone with a real GitHub profile: a
+   * student with 70 repositories got 12 projects and no explanation. The cap still exists —
+   * a runaway reply must not be able to bloat a library — but it is now per *call*, and the
+   * importer makes several calls over a chunked digest, so the ceiling on a whole import is
+   * this times the number of chunks.
+   */
+  perSection: 25,
   skillItems: 400,
   summary: 300,
-  /** Pasted text we will send. ~12k chars is a generous CV-length paste. */
-  input: 12_000,
+  /**
+   * Text sent in one call. The importer splits anything longer into chunks of this size
+   * rather than silently cutting the tail off, so this is a per-request budget and no longer
+   * a limit on how much of a profile can be imported.
+   */
+  input: 14_000,
 };
+
+/**
+ * Split a long digest into chunks the model can actually read.
+ *
+ * Cuts on the digest's own repo separators ("--- 7. project-name") wherever possible, so a
+ * project's heading, description and README stay in one piece — a chunk that begins halfway
+ * through a README is how you get an entry attributed to the wrong project. Falls back to
+ * paragraph and then hard boundaries for text that has no separators, such as a plain paste.
+ */
+export function chunkInput(text: string, size = MAX.input): string[] {
+  const clean = text.trim();
+  if (clean.length <= size) return clean ? [clean] : [];
+
+  // Prefer repo boundaries, then blank lines, then any newline.
+  const boundary = /\n(?=--- \d+\. )/g.test(clean) ? /\n(?=--- \d+\. )/ : /\n\n+/;
+  const parts = clean.split(boundary);
+
+  const chunks: string[] = [];
+  let current = "";
+  for (const part of parts) {
+    // A single part bigger than the budget (one enormous README) is cut on its own.
+    if (part.length > size) {
+      if (current.trim()) {
+        chunks.push(current.trim());
+        current = "";
+      }
+      for (let i = 0; i < part.length; i += size) chunks.push(part.slice(i, i + size).trim());
+      continue;
+    }
+    if (current.length + part.length + 2 > size) {
+      if (current.trim()) chunks.push(current.trim());
+      current = part;
+    } else {
+      current = current ? `${current}\n\n${part}` : part;
+    }
+  }
+  if (current.trim()) chunks.push(current.trim());
+  return chunks.filter(Boolean);
+}
 
 /** The tag vocabulary auto-selection understands. Anything else is dropped. */
 const KNOWN_TAGS = new Set([
@@ -102,8 +155,24 @@ ABSOLUTE RULES:
 4. Split distinct things into separate entries. One project per project.
 5. If the text is not about a person's experience at all, return every section as an empty array.
 
-Write each bullet as a short achievement line, ideally starting with a verb. Put a thing in
-exactly one section.
+HOW TO WRITE A BULLET — this is what separates a resume that gets read from one that does not.
+
+${XYZ_RULES}
+
+Rule 2 above outranks this entirely: the [Y] must be a number the text actually states. A repo
+whose README says "trained on 5,000 labelled images" gives you 5,000. A repo that states no
+number gives you no number, and you write the bullet without one. Never convert "a lot of
+users" into "1,000+ users", never turn "fast" into a percentage, and never describe a project
+as popular because it has stars unless the count is given.
+
+Give each project and each role TWO TO FOUR bullets, not one. A single line per project wastes
+the heading it costs. Draw them from different angles where the text supports it:
+  - what it does and who for
+  - the hard part of the build, and the technical decision behind it
+  - scale, data, performance or reach — only where the text states it
+  - what shipped: deployed, published, used by someone, won something
+
+Put a thing in exactly one section.
 
 Tag every entry using ONLY these tags (pick all that apply, or none):
 ai, ml, llm, cv, rag, sde, fullstack, backend, cloud, systems, distributed, web3, freelance,
@@ -278,6 +347,56 @@ export function parseExtraction(raw: string): Extracted {
     );
   }
   return { profile, sections, count };
+}
+
+/**
+ * Fold the results of several chunk calls into one review list.
+ *
+ * Chunks overlap in practice — a profile README mentions projects that also have their own
+ * repos, and a student's paste often repeats what GitHub already said — so entries are
+ * deduplicated on the same normalised label the duplicate check uses against the library.
+ * Where two chunks describe the same thing, the one with more bullets wins, since that is the
+ * one that had the fuller source text.
+ *
+ * Profile fields take the first non-empty value seen: the earliest chunk is the highest
+ * ranked repo and the student's own paste, both better sources than a tail README.
+ */
+export function mergeExtractions(parts: Extracted[]): Extracted {
+  const profile: Partial<Db["profile"]> = {};
+  for (const part of parts) {
+    for (const [k, v] of Object.entries(part.profile)) {
+      const key = k as keyof Db["profile"];
+      if (v && !String(profile[key] ?? "").trim()) profile[key] = v as string;
+    }
+  }
+
+  const bySection = new Map<SectionKey, Map<string, Record<string, unknown>>>();
+  for (const part of parts) {
+    for (const { key, items } of part.sections) {
+      const bucket = bySection.get(key) ?? new Map<string, Record<string, unknown>>();
+      for (const item of items) {
+        const label = norm(previewLabel(key, item));
+        // No usable label to compare on: keep it, keyed by its own id, rather than drop it.
+        const dedupeKey = label || `id:${String(item.id)}`;
+        const existing = bucket.get(dedupeKey);
+        if (!existing) {
+          bucket.set(dedupeKey, item);
+          continue;
+        }
+        const bulletsOf = (x: Record<string, unknown>) => ((x.bullets as Bullet[] | undefined) ?? []).length;
+        if (bulletsOf(item) > bulletsOf(existing)) bucket.set(dedupeKey, item);
+      }
+      bySection.set(key, bucket);
+    }
+  }
+
+  const sections: Extracted["sections"] = [];
+  for (const [key, bucket] of bySection) {
+    const items = [...bucket.values()];
+    if (items.length) sections.push({ key, items });
+  }
+
+  return { profile, sections, count: sections.reduce((n, s) => n + s.items.length, 0) };
 }
 
 // ---------------------------------------------------------------- merging

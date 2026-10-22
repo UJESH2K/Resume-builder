@@ -20,13 +20,31 @@ export function AuthForm({
   mode,
   action,
   next,
+  demo,
 }: {
   mode: "login" | "signup";
   action: Action;
   next?: string;
+  /** Present only where a shared demo account is configured. See lib/demo.ts. */
+  demo?: { username: string; password: string };
 }) {
   const [state, formAction] = useActionState<AuthState, FormData>(action, {});
   const signup = mode === "signup";
+  const showDemo = !signup && !!demo;
+
+  /**
+   * Fill the form with the demo credentials and submit it.
+   *
+   * `requestSubmit` rather than `submit` so the form still runs through React's action and
+   * the native validation, instead of bypassing both.
+   */
+  const fillDemo = (e: React.MouseEvent<HTMLButtonElement>) => {
+    const form = e.currentTarget.closest("form");
+    if (!form || !demo) return;
+    (form.elements.namedItem("email") as HTMLInputElement).value = demo.username;
+    (form.elements.namedItem("password") as HTMLInputElement).value = demo.password;
+    form.requestSubmit();
+  };
 
   return (
     <div className="auth-wrap">
@@ -66,12 +84,17 @@ export function AuthForm({
           )}
 
           <label className="auth-field">
-            <span>Email</span>
+            <span>{showDemo ? "Email or username" : "Email"}</span>
+            {/* type="text" where a demo account exists: the demo is reached by a username,
+                which the browser's own email validation would reject before submit. */}
             <input
               name="email"
-              type="email"
-              autoComplete="email"
-              placeholder="you@example.com"
+              type={showDemo ? "text" : "email"}
+              inputMode="email"
+              autoComplete={showDemo ? "username" : "email"}
+              autoCapitalize="off"
+              spellCheck={false}
+              placeholder={showDemo ? `you@example.com — or "${demo!.username}" for the demo` : "you@example.com"}
               defaultValue={state?.values?.email ?? ""}
               aria-invalid={!!state?.fields?.email}
               required
@@ -102,6 +125,19 @@ export function AuthForm({
             label={signup ? "Create account" : "Log in"}
             busy={signup ? "Creating account…" : "Logging in…"}
           />
+
+          {showDemo && (
+            <div className="auth-demo">
+              <button type="button" className="btn ghost auth-submit" onClick={fillDemo}>
+                Look around with the demo account
+              </button>
+              <small>
+                Signs in as <code>{demo!.username}</code> / <code>{demo!.password}</code> — a
+                shared, already filled-in library. Everyone using it edits the same copy, so
+                treat it as a sandbox and do not put anything private in it.
+              </small>
+            </div>
+          )}
         </form>
 
         <p className="auth-switch">
